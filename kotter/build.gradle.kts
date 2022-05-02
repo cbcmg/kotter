@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm")
+    id("org.jetbrains.compose")
     `maven-publish`
     signing
 }
@@ -27,6 +28,7 @@ fun MavenArtifactRepository.gcloudAuth() {
 
 repositories {
     mavenCentral()
+    maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     if (shouldPublishToGCloud()) {
         maven { gcloudAuth() }
     }
@@ -50,13 +52,16 @@ dependencies {
 
     // For GuardedBy concurrency annotation
     implementation("net.jcip:jcip-annotations:1.0")
+
+    // VirtualTerminal dependencies
+    implementation(compose.desktop.currentOs)
 }
 
 java {
     withJavadocJar()
     withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
 }
 
 publishing {

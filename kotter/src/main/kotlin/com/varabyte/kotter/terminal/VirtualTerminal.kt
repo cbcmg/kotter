@@ -1,69 +1,139 @@
+@file:OptIn(ExperimentalComposeUiApi::class)
+
 package com.varabyte.kotter.terminal
 
+import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.ClickableText
+import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.*
 import com.varabyte.kotter.runtime.internal.ansi.Ansi
 import com.varabyte.kotter.runtime.internal.text.TextPtr
 import com.varabyte.kotter.runtime.internal.text.substring
 import com.varabyte.kotter.runtime.terminal.Terminal
-import com.varabyte.kotter.terminal.swing.SgrCodeConverter
+import com.varabyte.kotter.terminal.compose.AnsiProcessedText
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import java.awt.*
-import java.awt.Cursor.HAND_CURSOR
-import java.awt.event.KeyAdapter
-import java.awt.event.KeyEvent
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
-import java.awt.event.MouseMotionAdapter
-import java.awt.event.WindowAdapter
-import java.awt.event.WindowEvent
-import java.awt.event.WindowEvent.WINDOW_CLOSING
-import java.awt.geom.Point2D
-import java.net.MalformedURLException
-import java.net.URI
-import java.net.URL
-import java.util.concurrent.CountDownLatch
-import javax.swing.BoundedRangeModel
-import javax.swing.JFrame
-import javax.swing.JScrollPane
-import javax.swing.JTextPane
-import javax.swing.SwingUtilities
-import javax.swing.border.EmptyBorder
-import javax.swing.text.AbstractDocument
-import javax.swing.text.AttributeSet
-import javax.swing.text.Document
-import javax.swing.text.DocumentFilter
-import javax.swing.text.MutableAttributeSet
-import javax.swing.text.SimpleAttributeSet
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import java.awt.Cursor
 import com.varabyte.kotter.foundation.text.Color as AnsiColor
+import java.awt.event.KeyEvent as AwtKeyEvent
 
 class TerminalSize(val width: Int, val height: Int) {
     init {
-        require(width >= 1 && height >= 1) { "TerminalSize values must both be positive. Got: $width, $height"}
+        require(width >= 1 && height >= 1) { "TerminalSize values must both be positive. Got: $width, $height" }
     }
 }
 
-private val ANSI_TO_SWING_COLORS = mapOf(
-    AnsiColor.BLACK to Color.BLACK,
-    AnsiColor.RED to Color.RED.darker(),
-    AnsiColor.GREEN to Color.GREEN.darker(),
-    AnsiColor.YELLOW to Color.YELLOW.darker(),
-    AnsiColor.BLUE to Color.BLUE.darker(),
-    AnsiColor.MAGENTA to Color.MAGENTA.darker(),
-    AnsiColor.CYAN to Color.CYAN.darker(),
-    AnsiColor.WHITE to Color.LIGHT_GRAY,
-    AnsiColor.BRIGHT_BLACK to Color.DARK_GRAY,
-    AnsiColor.BRIGHT_RED to Color.RED,
-    AnsiColor.BRIGHT_GREEN to Color.GREEN,
-    AnsiColor.BRIGHT_YELLOW to Color.YELLOW,
-    AnsiColor.BRIGHT_BLUE to Color.BLUE,
-    AnsiColor.BRIGHT_MAGENTA to Color.MAGENTA,
-    AnsiColor.BRIGHT_CYAN to Color.CYAN,
-    AnsiColor.BRIGHT_WHITE to Color.WHITE,
-)
-fun AnsiColor.toSwingColor(): Color = ANSI_TO_SWING_COLORS.getValue(this)
+private fun Color.darker() = Color(red * 0.7f, green * 0.7f, blue * 0.7f)
+private fun Color.invert() = Color(1.0f - red, 1.0f - green, 1.0f - blue)
 
-class VirtualTerminal private constructor(private val pane: SwingTerminalPane) : Terminal {
+private val ANSI_TO_COMPOSE_COLORS = mapOf(
+    AnsiColor.BLACK to Color.Black,
+    AnsiColor.RED to Color.Red.darker(),
+    AnsiColor.GREEN to Color.Green.darker(),
+    AnsiColor.YELLOW to Color.Yellow.darker(),
+    AnsiColor.BLUE to Color.Blue.darker(),
+    AnsiColor.MAGENTA to Color.Magenta.darker(),
+    AnsiColor.CYAN to Color.Cyan.darker(),
+    AnsiColor.WHITE to Color.LightGray,
+    AnsiColor.BRIGHT_BLACK to Color.DarkGray,
+    AnsiColor.BRIGHT_RED to Color.Red,
+    AnsiColor.BRIGHT_GREEN to Color.Green,
+    AnsiColor.BRIGHT_YELLOW to Color.Yellow,
+    AnsiColor.BRIGHT_BLUE to Color.Blue,
+    AnsiColor.BRIGHT_MAGENTA to Color.Magenta,
+    AnsiColor.BRIGHT_CYAN to Color.Cyan,
+    AnsiColor.BRIGHT_WHITE to Color.White,
+)
+
+fun AnsiColor.toComposeColor(): Color = ANSI_TO_COMPOSE_COLORS.getValue(this)
+
+private fun KeyEvent.isOnlyCtrlPressed() =
+    this.isCtrlPressed && !this.isShiftPressed && !this.isAltPressed && !this.isMetaPressed
+
+private fun KeyEvent.isOnlyShiftPressed() =
+    !this.isCtrlPressed && this.isShiftPressed && !this.isAltPressed && !this.isMetaPressed
+
+private fun KeyEvent.noControlKeysPressed() =
+    !this.isCtrlPressed && !this.isShiftPressed && !this.isAltPressed && !this.isMetaPressed
+
+/**
+ * @param windowState Pass in the window state, which may have a size we can use to bypass the measuring step.
+ *
+ * In this way, we get an initial measurement when the app first renders, and then the window takes over once it knows
+ * about its children sizes in the future. This also handles window resize events, when the user manually changes
+ * things.
+ */
+@Composable
+private fun MeasureTerminalArea(
+    terminalSize: TerminalSize,
+    fontSize: Int,
+    lineHeight: Int,
+    paddingLeftRight: Int,
+    paddingTopBottom: Int,
+    windowState: WindowState,
+    content: @Composable (width: Dp, height: Dp) -> Unit
+) {
+    SubcomposeLayout { constraints ->
+        val contentPlaceable = if (!windowState.size.isSpecified) {
+            val charArea = subcompose("dummyChar") {
+                MonospaceLine(AnnotatedString("X"), fontSize, lineHeight)
+            }.first().measure(constraints)
+
+            subcompose("content") {
+                content(
+                    (charArea.width * terminalSize.width + 2 * paddingLeftRight).toDp(),
+                    (charArea.height * terminalSize.height + 2 * paddingTopBottom).toDp()
+                )
+            }.first().measure(constraints)
+        } else {
+            subcompose("content") {
+                content(windowState.size.width, windowState.size.height)
+            }.first().measure(constraints)
+        }
+
+        layout(contentPlaceable.width, contentPlaceable.height) {
+            contentPlaceable.place(0, 0)
+        }
+    }
+}
+
+class VirtualTerminal private constructor(
+    private val writeChannel: SendChannel<String>,
+    private val readChannel: ReceiveChannel<KeyEvent>,
+) : Terminal {
     companion object {
         /**
          * @param terminalSize Number of characters, so 80x32 will be expanded to fit 80 characters horizontally and
@@ -75,370 +145,272 @@ class VirtualTerminal private constructor(private val pane: SwingTerminalPane) :
         fun create(
             title: String = "Virtual Terminal",
             terminalSize: TerminalSize = TerminalSize(100, 40),
-            fontSize: Int = 16,
             fgColor: AnsiColor = AnsiColor.WHITE,
             bgColor: AnsiColor = AnsiColor.BLACK,
+            fontSize: Int = 16,
+            lineHeight: Int = fontSize,
+            paddingLeftRight: Int = 20,
+            paddingTopBottom: Int = 10,
             maxNumLines: Int = 1000,
             handleInterrupt: Boolean = true
         ): VirtualTerminal {
-            val pane = SwingTerminalPane(fontSize, fgColor.toSwingColor(), bgColor.toSwingColor(), maxNumLines.coerceAtLeast(terminalSize.height))
-            pane.focusTraversalKeysEnabled = false // Don't handle TAB, we want to send it to the user
-            pane.text = buildString {
-                // Set initial text to a block of blank characters so pack will set it to the right size
-                for (h in 0 until terminalSize.height) {
-                    if (h > 0) appendLine()
-                    for (w in 0 until terminalSize.width) {
-                        append(' ')
+            @Suppress("NAME_SHADOWING")
+            val lineHeight = lineHeight.coerceAtLeast(fontSize)
+
+            val writeChannel = Channel<String>()
+            val readChannel = Channel<KeyEvent>()
+
+            // Create a thread that will keep the program alive until it exits, and we'll use that to host our Compose UI
+            Thread({
+                application {
+                    var pressAnyKeyToExit by mutableStateOf(false)
+                    val processedText =
+                        remember { AnsiProcessedText(fgColor.toComposeColor(), bgColor.toComposeColor()) }
+                    LaunchedEffect(Unit) {
+                        try {
+                            while (true) {
+                                val text = writeChannel.receive()
+                                Snapshot.withMutableSnapshot {
+                                    processedText.process(text)
+                                    if (processedText.lines.size > maxNumLines) {
+                                        processedText.lines.removeRange(0, processedText.lines.size - maxNumLines)
+                                    }
+                                }
+                            }
+                        } catch (ignored: Exception) {
+                            // Add a bit of padding if necessary. There should be two blank lines between the end text
+                            // and our own (since our own text will be appended onto the last blank line)
+                            val blankCount = processedText.lines.takeLast(2).count { it.isEmpty() }
+                            repeat((2 - blankCount).coerceAtLeast(0)) { processedText.process("\n") }
+                            processedText.process("(This terminal session has ended. Press any key to continue.)")
+                            pressAnyKeyToExit = true
+                        }
                     }
-                }
-            }
 
-            val terminal = VirtualTerminal(pane)
-            val framePacked = CountDownLatch(1)
-            SwingUtilities.invokeLater {
-                val frame = JFrame(title)
-                frame.defaultCloseOperation = JFrame.EXIT_ON_CLOSE
+                    val windowState = rememberWindowState(
+                        width = Dp.Unspecified,
+                        height = Dp.Unspecified,
+                        position = WindowPosition(Alignment.Center)
+                    )
 
-                frame.contentPane.add(JScrollPane(terminal.pane).apply {
-                    border = EmptyBorder(5, 5, 5, 5)
-                    foreground = fgColor.toSwingColor()
-                    background = bgColor.toSwingColor()
-                })
-                frame.pack()
-                frame.setLocationRelativeTo(null)
-
-                terminal.pane.text = ""
-                if (handleInterrupt) {
-                    terminal.pane.addKeyListener(object : KeyAdapter() {
-                        override fun keyPressed(e: KeyEvent) {
-                            if (e.isControlDown && e.keyCode == KeyEvent.VK_C) {
-                                frame.dispatchEvent(WindowEvent(frame, WINDOW_CLOSING))
-                                e.consume()
+                    Window(
+                        onCloseRequest = ::exitApplication,
+                        state = windowState,
+                        title = title,
+                        onKeyEvent = {
+                            if (it.type != KeyEventType.KeyDown) return@Window false
+                            if (pressAnyKeyToExit || (handleInterrupt && it.isOnlyCtrlPressed() && it.key == Key.C)) {
+                                exitApplication()
+                                true
+                            } else {
+                                runBlocking { readChannel.trySend(it) }
+                                true
                             }
                         }
-                    })
+                    ) {
+                        MeasureTerminalArea(
+                            terminalSize,
+                            fontSize,
+                            lineHeight,
+                            paddingLeftRight,
+                            paddingTopBottom,
+                            windowState
+                        ) { width, height ->
+                            TerminalPane(
+                                width,
+                                height,
+                                bgColor.toComposeColor(),
+                                fontSize,
+                                lineHeight,
+                                paddingLeftRight,
+                                paddingTopBottom,
+                                processedText.lines,
+                            )
+                        }
+                    }
                 }
-
-                framePacked.countDown()
-                frame.isVisible = true
-            }
-            framePacked.await()
-
-            return terminal
+            }, "Compose Main").start()
+            return VirtualTerminal(writeChannel, readChannel)
         }
     }
-
-    private inline fun <reified T> Component.findAncestor(): T? {
-        var c: Component? = this
-        while (c != null) {
-            if (c is T) return c
-            c = c.parent
-        }
-        return null
-    }
-
-    private val Component.window get() = findAncestor<Window>()
-    private val Component.scrollPane get() = findAncestor<JScrollPane>()
-    // Note: For some reason, sometimes the text pane doesn't scroll the bar all the way to the bottom
-    private fun BoundedRangeModel.isAtEnd() = value + extent + pane.font.size >= maximum
-
-    private var listenersAdded = false
-    private var userVScrollPos: Int? = null
-    private var userHScrollPos: Int? = null
 
     override fun write(text: String) {
-        SwingUtilities.invokeLater {
-            // Here, we update our text pane causing it to repaint, but as a side effect, this screws with the
-            // vscroll and hscroll positions. If the user has intentionally set either of those values themselves,
-            // we should fight to keep them.
-            val scrollPane = pane.scrollPane!!
-            fun updateVScrollPos() {
-                userVScrollPos = null
-                scrollPane.verticalScrollBar.model.let { model ->
-                    if (!model.isAtEnd()) {
-                        userVScrollPos = model.value
-                    }
-                }
-            }
-
-            fun updateHScrollPos() {
-                userHScrollPos = null
-                scrollPane.horizontalScrollBar.model.let { model ->
-                    if (model.value > 0) {
-                        userHScrollPos = model.value
-                    }
-                }
-            }
-            if (!listenersAdded) {
-                scrollPane.verticalScrollBar.addAdjustmentListener { evt -> if (evt.valueIsAdjusting) updateVScrollPos() }
-                scrollPane.horizontalScrollBar.addAdjustmentListener { evt -> if (evt.valueIsAdjusting) updateHScrollPos() }
-                scrollPane.addMouseWheelListener { updateVScrollPos() }
-
-                listenersAdded = true
-            }
-
-            pane.processAnsiText(text)
-
-            userVScrollPos?.let {
-                SwingUtilities.invokeLater { scrollPane.verticalScrollBar.model.value = it }
-            }
-            userHScrollPos?.let {
-                SwingUtilities.invokeLater { scrollPane.horizontalScrollBar.model.value = it }
-            }
-        }
+        runBlocking { writeChannel.send(text) }
     }
 
     private val charFlow: Flow<Int> by lazy {
         callbackFlow {
-            pane.addKeyListener(object : KeyAdapter() {
-                override fun keyPressed(e: KeyEvent) {
-                    val chars: CharSequence = when (e.keyCode) {
-                        KeyEvent.VK_UP -> Ansi.Csi.Codes.Keys.UP.toFullEscapeCode()
-                        KeyEvent.VK_DOWN -> Ansi.Csi.Codes.Keys.DOWN.toFullEscapeCode()
-                        KeyEvent.VK_LEFT -> Ansi.Csi.Codes.Keys.LEFT.toFullEscapeCode()
-                        KeyEvent.VK_RIGHT -> Ansi.Csi.Codes.Keys.RIGHT.toFullEscapeCode()
-                        KeyEvent.VK_HOME -> Ansi.Csi.Codes.Keys.HOME.toFullEscapeCode()
-                        KeyEvent.VK_INSERT -> Ansi.Csi.Codes.Keys.INSERT.toFullEscapeCode()
-                        KeyEvent.VK_DELETE -> Ansi.Csi.Codes.Keys.DELETE.toFullEscapeCode()
-                        KeyEvent.VK_END -> Ansi.Csi.Codes.Keys.END.toFullEscapeCode()
-                        KeyEvent.VK_PAGE_UP -> Ansi.Csi.Codes.Keys.PG_UP.toFullEscapeCode()
-                        KeyEvent.VK_PAGE_DOWN -> Ansi.Csi.Codes.Keys.PG_DOWN.toFullEscapeCode()
-                        KeyEvent.VK_ENTER -> Ansi.CtrlChars.ENTER.toString()
-                        KeyEvent.VK_BACK_SPACE -> Ansi.CtrlChars.BACKSPACE.toString()
-                        KeyEvent.VK_TAB -> Ansi.CtrlChars.TAB.toString()
-                        KeyEvent.VK_ESCAPE -> Ansi.CtrlChars.ESC.toString()
+            try {
+                while (true) {
+                    val keyEvent = readChannel.receive()
+                    val chars: CharSequence = when (keyEvent.key) {
+                        Key.DirectionUp -> Ansi.Csi.Codes.Keys.UP.toFullEscapeCode()
+                        Key.DirectionDown -> Ansi.Csi.Codes.Keys.DOWN.toFullEscapeCode()
+                        Key.DirectionLeft -> Ansi.Csi.Codes.Keys.LEFT.toFullEscapeCode()
+                        Key.DirectionRight -> Ansi.Csi.Codes.Keys.RIGHT.toFullEscapeCode()
+                        Key.MoveHome -> Ansi.Csi.Codes.Keys.HOME.toFullEscapeCode()
+                        Key.Insert -> Ansi.Csi.Codes.Keys.INSERT.toFullEscapeCode()
+                        Key.Delete -> Ansi.Csi.Codes.Keys.DELETE.toFullEscapeCode()
+                        Key.MoveEnd -> Ansi.Csi.Codes.Keys.END.toFullEscapeCode()
+                        Key.PageUp -> Ansi.Csi.Codes.Keys.PG_UP.toFullEscapeCode()
+                        Key.PageDown -> Ansi.Csi.Codes.Keys.PG_DOWN.toFullEscapeCode()
+                        Key.Enter -> Ansi.CtrlChars.ENTER.toString()
+                        Key.Backspace -> Ansi.CtrlChars.BACKSPACE.toString()
+                        Key.Tab -> Ansi.CtrlChars.TAB.toString()
+                        Key.Escape -> Ansi.CtrlChars.ESC.toString()
 
                         else -> {
-                            if (e.isControlDown) {
-                                when (e.keyCode) {
-                                    KeyEvent.VK_D -> Ansi.CtrlChars.EOF.toString()
+                            if (keyEvent.isOnlyCtrlPressed()) {
+                                when (keyEvent.key) {
+                                    Key.D -> Ansi.CtrlChars.EOF.toString()
                                     else -> ""
                                 }
-                            }
-                            else {
-                                e.keyChar.takeIf { it.isDefined() && it.category != CharCategory.CONTROL }?.toString()
-                                    ?: ""
+                            } else {
+                                val noControlKeysPressed = keyEvent.noControlKeysPressed()
+                                val shiftPressed = keyEvent.isOnlyShiftPressed()
+                                if (noControlKeysPressed || shiftPressed) {
+                                    val awtKeyEvent = keyEvent.nativeKeyEvent as AwtKeyEvent
+                                    awtKeyEvent.keyChar
+                                        .takeIf { it.isDefined() && it.category != CharCategory.CONTROL }
+                                        ?.toString() ?: ""
+                                } else ""
                             }
                         }
                     }
                     chars.forEach { c -> trySend(c.code) }
-                    if (chars.isNotEmpty()) e.consume()
                 }
-            })
-
-            pane.window!!.addWindowListener(object : WindowAdapter() {
-                override fun windowClosing(e: WindowEvent?) {
-                    channel.close()
-                }
-            })
+            } catch (ignored: Exception) {
+                // This is expected, when the upstream channel closes
+            }
 
             awaitClose()
         }
     }
-    override fun read(): Flow<Int> = charFlow
 
+    override fun read(): Flow<Int> = charFlow
     override fun close() {
-        SwingUtilities.invokeLater {
-            // There should always be two newlines before this final text so this looks good. Append them
-            // if they're not there!
-            val prependNewlines = "\n".repeat(2 - pane.text.takeLast(2).count { it == '\n' })
-            write("$prependNewlines(This terminal session has ended. Press any key to continue.)")
-        }
-        pane.addKeyListener(object : KeyAdapter() {
-            override fun keyPressed(e: KeyEvent?) {
-                with(pane.window!!) {
-                    dispatchEvent(WindowEvent(this, WINDOW_CLOSING))
-                }
-            }
-        })
+        writeChannel.close()
     }
 }
 
+/**
+ * Render a single line in monospace font.
+ *
+ * Also supports clicking on a URL if detected.
+ */
+@Composable
+private fun MonospaceLine(annotatedText: AnnotatedString, fontSize: Int, lineHeight: Int) {
+    val uriHandler = LocalUriHandler.current
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var showPointerCursor by remember { mutableStateOf(false) }
 
-private fun Document.getText() = getText(0, length)
-
-class SwingTerminalPane(fontSize: Int, fgColor: Color, bgColor: Color, maxNumLines: Int) : JTextPane() {
-    private val sgrCodeConverter: SgrCodeConverter
-
-    init {
-        isEditable = false
-        font = Font(Font.MONOSPACED, Font.PLAIN, fontSize)
-        foreground = fgColor
-        background = bgColor
-        sgrCodeConverter = SgrCodeConverter(foreground, background)
-
-        (styledDocument as AbstractDocument).documentFilter = object : DocumentFilter() {
-            override fun insertString(fb: FilterBypass, offset: Int, string: String, attr: AttributeSet) {
-                super.insertString(fb, offset, string, attr)
-                val rootElement = styledDocument.defaultRootElement
-                val numLines = rootElement.elementCount
-                if (numLines > maxNumLines) {
-                    val lastLineIndex = numLines - maxNumLines - 1
-                    val lastLineOffset = rootElement.getElement(lastLineIndex).startOffset
-                    remove(fb, 0, lastLineOffset)
-                }
-            }
-        }
-
-        resetMouseListeners()
-    }
-
-    private fun getWordUnderPt(pt: Point2D): String {
-        val offset = this.viewToModel2D(pt)
-        val textPtr = TextPtr(styledDocument.getText(), offset)
-
+    fun getUriAt(offset: Int): String? {
+        val textPtr = TextPtr(annotatedText.text, offset)
         textPtr.incrementUntil { it.isWhitespace() }
         val end = textPtr.charIndex
-
         textPtr.decrementUntil { it.isWhitespace() }
-        val start = textPtr.charIndex
-        return textPtr.substring(end - start)
+        val clickedWord = textPtr.substring(end - textPtr.charIndex).trim()
+        return if (listOf("http://", "https://").any { clickedWord.startsWith(it, ignoreCase = true) }) {
+            clickedWord
+        } else null
     }
 
-    private fun resetMouseListeners() {
-        // The existing mouse handlers set the cursor behind our back which mess with the repainting of the area
-        // Let's just disable them for now.
-        mouseListeners.toList().forEach { removeMouseListener(it) }
-        mouseMotionListeners.toList().forEach { removeMouseMotionListener(it) }
-
-        addMouseMotionListener(object : MouseMotionAdapter() {
-            override fun mouseMoved(e: MouseEvent) {
-                val wordUnderCursor = getWordUnderPt(e.point)
-                cursor = try {
-                    URL(wordUnderCursor)
-                    Cursor.getPredefinedCursor(HAND_CURSOR)
-                } catch (ignored: MalformedURLException) {
-                    Cursor.getDefaultCursor()
+    ClickableText(
+        annotatedText,
+        style = TextStyle(
+            fontFamily = FontFamily.Monospace,
+            fontSize = fontSize.sp,
+            lineHeight = lineHeight.sp,
+        ),
+        maxLines = 1,
+        overflow = TextOverflow.Clip,
+        modifier = Modifier
+            .onPointerEvent(PointerEventType.Move) { event ->
+                layoutResult?.let { layoutResult ->
+                    val offset = layoutResult.getOffsetForPosition(event.changes.first().position)
+                    showPointerCursor = getUriAt(offset) != null
                 }
             }
-        })
+            .pointerHoverIcon(PointerIcon(if (showPointerCursor) Cursor(Cursor.HAND_CURSOR) else Cursor.getDefaultCursor())),
+        onTextLayout = { layoutResult = it }
+    ) { offset -> getUriAt(offset)?.let { uri -> uriHandler.openUri(uri) } }
+}
 
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) {
-                val wordUnderCursor = getWordUnderPt(e.point)
-                try {
-                    Desktop.getDesktop().browse(URL(wordUnderCursor).toURI())
-                }
-                catch (ignored: MalformedURLException) {}
-            }
-        })
-    }
+private val SCROLL_SIZE = 8.dp
+private fun createScrollbarStyle(color: Color) = defaultScrollbarStyle().copy(
+    hoverColor = color.copy(alpha = 0.5f),
+    unhoverColor = color.copy(alpha = 0.12f)
+)
 
-    private fun processEscapeCode(textPtr: TextPtr, doc: Document, attrs: MutableAttributeSet): Boolean {
-        if (!textPtr.increment()) return false
-        return when (textPtr.currChar) {
-            Ansi.EscSeq.CSI -> processCsiCode(textPtr, doc, attrs)
-            else -> false
+@Composable
+private fun TerminalPane(
+    width: Dp,
+    height: Dp,
+    bg: Color,
+    fontSize: Int,
+    lineHeight: Int,
+    paddingLeftRight: Int,
+    paddingTopBottom: Int,
+    lines: List<AnnotatedString>
+) {
+    Box(
+        Modifier.background(bg)
+            .padding(
+                start = paddingLeftRight.dp,
+                end = paddingLeftRight.dp,
+                top = paddingTopBottom.dp,
+                bottom = paddingTopBottom.dp
+            )
+            .width(width)
+            .height(height),
+    ) {
+        val listState = rememberLazyListState()
+        var stickToBottom by remember { mutableStateOf(true) }
+        LaunchedEffect(listState.layoutInfo.totalItemsCount) {
+            if (stickToBottom) listState.scrollToItem(lines.size)
         }
-    }
 
-    private fun processCsiCode(textPtr: TextPtr, doc: Document, attrs: MutableAttributeSet): Boolean {
-        if (!textPtr.increment()) return false
-
-        val csiParts = Ansi.Csi.Code.parts(textPtr) ?: return false
-        val csiCode = Ansi.Csi.Code(csiParts)
-
-        val identifier = Ansi.Csi.Identifier.fromCode(csiCode) ?: return false
-        return when (identifier) {
-            Ansi.Csi.Identifiers.CURSOR_PREV_LINE -> {
-                var numLines = csiCode.parts.numericCode ?: 1
-                with(TextPtr(doc.getText(), caretPosition)) {
-                    // First, move to beginning of this line
-                    if (currChar != '\n') {
-                        decrementUntil { it == '\n' }
-                    }
-                    while (numLines > 0) {
-                        if (!decrementUntil { it == '\n' }) {
-                            // We hit the beginning of the text area so just abort early
-                            break
-                        }
-                        --numLines
-                    }
-                    if (currChar == '\n') {
-                        // We're now at the beginning of the new line. Increment so we don't delete it too.
-                        increment()
-                    }
-                    caretPosition = charIndex
-                    doc.remove(caretPosition, doc.length - caretPosition)
-                }
-                true
-            }
-            Ansi.Csi.Identifiers.ERASE_LINE -> {
-                when (csiCode) {
-                    Ansi.Csi.Codes.Erase.CURSOR_TO_LINE_END -> {
-                        with(TextPtr(doc.getText(), caretPosition)) {
-                            incrementUntil { it == '\n' }
-                            doc.remove(caretPosition, charIndex - caretPosition)
-                        }
-                        true
-                    }
-                    else -> false
-                }
-            }
-            Ansi.Csi.Identifiers.SGR -> {
-                sgrCodeConverter.convert(csiCode)?.let { modifyAttributes ->
-                    modifyAttributes(attrs)
-                    true
-                } ?: false
-            }
-            else -> return false
+        fun checkStickToBottom() {
+            stickToBottom = listState.layoutInfo.visibleItemsInfo.last().index == lines.lastIndex
         }
-    }
 
-    fun processAnsiText(text: String) {
-        require(SwingUtilities.isEventDispatchThread())
-        if (text.isEmpty()) return
+        val hscroll = rememberScrollState()
+        val hscrollAdapter = rememberScrollbarAdapter(hscroll)
+        val vscrollAdapter = rememberScrollbarAdapter(listState)
+        val interactionSource = remember { MutableInteractionSource() }
 
-        val doc = styledDocument
-        val attrs = SimpleAttributeSet()
-        val stringBuilder = StringBuilder()
-        fun flush() {
-            val stringToInsert = stringBuilder.toString()
-            if (stringToInsert.isNotEmpty()) {
-                doc.insertString(caretPosition, stringToInsert, attrs)
-                stringBuilder.clear()
+        val coroutineScope = rememberCoroutineScope()
+        coroutineScope.launch {
+            interactionSource.interactions.collectLatest {
+                if (it is DragInteraction) checkStickToBottom()
             }
         }
 
-        val textPtr = TextPtr(text)
-        do {
-            when (textPtr.currChar) {
-                Ansi.CtrlChars.ESC -> {
-                    flush()
-                    val prevCharIndex = textPtr.charIndex
-                    if (!processEscapeCode(textPtr, doc, attrs)) {
-                        // Skip over escape byte or else error message will be interpreted as an ANSI command!
-                        textPtr.charIndex = prevCharIndex + 1
-                        val peek = textPtr.substring(7)
-                        val truncated = peek.length < textPtr.remainingLength
-                        throw IllegalArgumentException(
-                            "Unknown escape sequence: \"${peek}${if (truncated) "..." else ""}\""
-                        )
-                    }
+        // Make extra space between the scrollbar and content
+        LazyColumn(
+            Modifier
+                .fillMaxSize()
+                .padding(end = SCROLL_SIZE * 2, bottom = SCROLL_SIZE * 2)
+                .horizontalScroll(hscroll)
+                .onPointerEvent(PointerEventType.Scroll) { checkStickToBottom() },
+            listState
+        ) {
+            lines.forEach { text ->
+                item {
+                    MonospaceLine(text, fontSize, lineHeight)
                 }
-                '\r' -> {
-                    with(TextPtr(doc.getText(), caretPosition)) {
-                        decrementWhile { it != '\n' }
-                        // Assuming we didn't hit the beginning of the string, we went too far by one
-                        if (charIndex > 0) increment()
-
-                        caretPosition = charIndex
-                    }
-                }
-                Char.MIN_VALUE -> {
-                } // Ignore the null terminator, it's only a TextPtr/Document concept
-                else -> stringBuilder.append(textPtr.currChar)
             }
-        } while (textPtr.increment())
-        flush()
-
-        // Hack alert: I'm not sure why, but calling updateUI is the only consistent way I've been able to get the text
-        // pane to refresh its text contents without stuttering. However, this sometimes affects the caret position? So
-        // we reset it back.
-        caretPosition.let { prevCaret ->
-            updateUI()
-            resetMouseListeners()
-            caretPosition = prevCaret
         }
+        VerticalScrollbar(
+            vscrollAdapter,
+            Modifier.fillMaxHeight().padding(bottom = SCROLL_SIZE * 2).align(Alignment.CenterEnd).width(SCROLL_SIZE),
+            style = createScrollbarStyle(bg.invert()),
+            interactionSource = interactionSource,
+        )
+        HorizontalScrollbar(
+            hscrollAdapter,
+            Modifier.fillMaxWidth().padding(end = SCROLL_SIZE * 2).align(Alignment.BottomCenter).height(SCROLL_SIZE),
+            style = createScrollbarStyle(bg.invert())
+        )
     }
 }
