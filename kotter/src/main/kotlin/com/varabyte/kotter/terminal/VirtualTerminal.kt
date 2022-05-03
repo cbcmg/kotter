@@ -26,6 +26,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.toFontFamily
+import androidx.compose.ui.text.platform.Font
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.awt.Cursor
+import java.nio.file.Path
 import com.varabyte.kotter.foundation.text.Color as AnsiColor
 import java.awt.event.KeyEvent as AwtKeyEvent
 
@@ -99,6 +102,7 @@ private fun KeyEvent.noControlKeysPressed() =
 @Composable
 private fun MeasureTerminalArea(
     terminalSize: TerminalSize,
+    fontFamily: FontFamily,
     fontSize: Int,
     lineHeight: Int,
     paddingLeftRight: Int,
@@ -109,7 +113,7 @@ private fun MeasureTerminalArea(
     SubcomposeLayout { constraints ->
         val contentPlaceable = if (!windowState.size.isSpecified) {
             val charArea = subcompose("dummyChar") {
-                MonospaceLine(AnnotatedString("X"), fontSize, lineHeight)
+                MonospaceLine(AnnotatedString("X"), fontFamily, fontSize, lineHeight)
             }.first().measure(constraints)
 
             subcompose("content") {
@@ -147,6 +151,7 @@ class VirtualTerminal private constructor(
             terminalSize: TerminalSize = TerminalSize(100, 40),
             fgColor: AnsiColor = AnsiColor.WHITE,
             bgColor: AnsiColor = AnsiColor.BLACK,
+            fontOverride: Path? = null,
             fontSize: Int = 16,
             lineHeight: Int = fontSize,
             paddingLeftRight: Int = 20,
@@ -154,6 +159,8 @@ class VirtualTerminal private constructor(
             maxNumLines: Int = 1000,
             handleInterrupt: Boolean = true
         ): VirtualTerminal {
+            val fontFamily = fontOverride?.let { Font(it.toFile()).toFontFamily() } ?: FontFamily.Monospace
+
             @Suppress("NAME_SHADOWING")
             val lineHeight = lineHeight.coerceAtLeast(fontSize)
 
@@ -210,6 +217,7 @@ class VirtualTerminal private constructor(
                     ) {
                         MeasureTerminalArea(
                             terminalSize,
+                            fontFamily,
                             fontSize,
                             lineHeight,
                             paddingLeftRight,
@@ -220,6 +228,7 @@ class VirtualTerminal private constructor(
                                 width,
                                 height,
                                 bgColor.toComposeColor(),
+                                fontFamily,
                                 fontSize,
                                 lineHeight,
                                 paddingLeftRight,
@@ -299,7 +308,7 @@ class VirtualTerminal private constructor(
  * Also supports clicking on a URL if detected.
  */
 @Composable
-private fun MonospaceLine(annotatedText: AnnotatedString, fontSize: Int, lineHeight: Int) {
+private fun MonospaceLine(annotatedText: AnnotatedString, fontFamily: FontFamily, fontSize: Int, lineHeight: Int) {
     val uriHandler = LocalUriHandler.current
     var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
     var showPointerCursor by remember { mutableStateOf(false) }
@@ -318,7 +327,7 @@ private fun MonospaceLine(annotatedText: AnnotatedString, fontSize: Int, lineHei
     ClickableText(
         annotatedText,
         style = TextStyle(
-            fontFamily = FontFamily.Monospace,
+            fontFamily = fontFamily,
             fontSize = fontSize.sp,
             lineHeight = lineHeight.sp,
         ),
@@ -347,6 +356,7 @@ private fun TerminalPane(
     width: Dp,
     height: Dp,
     bg: Color,
+    fontFamily: FontFamily,
     fontSize: Int,
     lineHeight: Int,
     paddingLeftRight: Int,
@@ -397,7 +407,7 @@ private fun TerminalPane(
         ) {
             lines.forEach { text ->
                 item {
-                    MonospaceLine(text, fontSize, lineHeight)
+                    MonospaceLine(text, fontFamily, fontSize, lineHeight)
                 }
             }
         }
